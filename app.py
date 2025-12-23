@@ -41,23 +41,19 @@ def start_srt_relay():
     global server_state
 
     try:
-        logger.info(f"🚀 Démarrage du relay SRT sur le port {SRT_PORT}")
+        logger.info(f"🚀 Démarrage du relay SRT sur les ports internes {SRT_PORT} (OBS) et {SRT_PORT + 1} (vMix)")
 
-        # Commande srt-live-transmit pour relay SRT pur
-        # Format: srt-live-transmit [options] INPUT OUTPUT
-        # OBS se connecte sur port 9000, on redirige vers port 9001 pour vMix
         cmd = [
             'srt-live-transmit',
-            '-v',  # Verbose pour voir les logs
-            '-s:2000000',  # Statsout toutes les 2s
-            f'srt://0.0.0.0:{SRT_PORT}?mode=listener&latency=200',  # Input: écoute OBS
-            f'srt://0.0.0.0:{SRT_PORT + 1}?mode=listener&latency=200'  # Output: écoute vMix
+            '-v',
+            f'srt://0.0.0.0:{SRT_PORT}?mode=listener',
+            f'srt://0.0.0.0:{SRT_PORT + 1}?mode=listener'
         ]
 
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Combine stderr et stdout
+            stderr=subprocess.PIPE,
             universal_newlines=True,
             bufsize=1
         )
@@ -66,45 +62,39 @@ def start_srt_relay():
         server_state['is_running'] = True
         server_state['start_time'] = datetime.now()
 
-        logger.info("✅ Relay SRT démarré avec succès")
-        logger.info(f"📥 OBS: Connectez-vous sur port {SRT_PORT} (mode Caller)")
-        logger.info(f"📺 vMix: Connectez-vous sur port {SRT_PORT + 1} (mode Caller)")
-
-        # Thread pour lire les logs srt-live-transmit
+        logger.info("✅ Relay SRT démarré avec succès.")
+        
         threading.Thread(target=monitor_srt_output, args=(process,), daemon=True).start()
 
+    except FileNotFoundError:
+        logger.error("❌ CRITIQUE: La commande 'srt-live-transmit' est introuvable. Assurez-vous que 'srt-tools' est installé dans le Dockerfile.")
+        server_state['is_running'] = False
     except Exception as e:
         logger.error(f"❌ Erreur démarrage SRT relay: {e}")
         server_state['is_running'] = False
 
 
 def monitor_srt_output(process):
-    """Monitore la sortie de srt-live-transmit pour détecter connexions et stats"""
+    """Monitore la sortie de srt-live-transmit pour détecter connexions"""
     global server_state
 
-    for line in iter(process.stdout.readline, ''):
+    for line in iter(process.stderr.readline, ''):
         if not line:
             break
 
         line_lower = line.lower()
+        logger.info(f"SRT_LOG: {line.strip()}")
 
-        # Log TOUTES les lignes pour debug complet
-        logger.info(f"SRT: {line.strip()}")
-
-        # Détection connexion SRT (acceptation de caller)
-        if 'accepted' in line_lower or 'connected' in line_lower or 'caller' in line_lower:
-            # Si port 9000 mentionné = OBS
-            if f':{SRT_PORT}' in line or 'source' in line_lower:
+        if 'accepted' in line_lower or 'connected' in line_lower:
+            if f':{SRT_PORT}' in line:
                 logger.info("📥 OBS connecté!")
                 server_state['obs_connected'] = True
                 server_state['obs_connection_time'] = datetime.now()
-            # Si port 9001 mentionné = vMix
-            if f':{SRT_PORT + 1}' in line:
+            elif f':{SRT_PORT + 1}' in line:
                 logger.info("📺 vMix connecté!")
                 server_state['vmix_connected'] = True
                 server_state['vmix_connection_time'] = datetime.now()
 
-        # Extraction stats (mbps, kbps, packets)
         if 'mbps' in line_lower or 'kbps' in line_lower:
             try:
                 import re
@@ -114,11 +104,10 @@ def monitor_srt_output(process):
             except:
                 pass
 
-        # Détection déconnexion
-        if 'closed' in line_lower or 'disconnected' in line_lower or 'broken' in line_lower or 'timeout' in line_lower:
+        if 'closed' in line_lower or 'disconnected' in line_lower or 'broken' in line_lower:
             logger.warning("⚠️ Déconnexion détectée")
-            server_state['obs_connected'] = False
-            server_state['vmix_connected'] = False
+            # Ne pas tout réinitialiser, on ne sait pas qui s'est déconnecté
+            # La logique de reconnexion est gérée par les clients (OBS/vMix)
 
     logger.warning("⚠️ Processus srt-live-transmit terminé")
     server_state['is_running'] = False
@@ -448,8 +437,8 @@ HTML_TEMPLATE = """
             </div>
             {% else %}
             <div class="warning">
-                <strong>⚠️ Le serveur démarre...</strong>
-                <p>Rafraîchissez la page dans quelques secondes.</p>
+                <strong>⚠️ Le serveur démarre ou est arrêté.</strong>
+                <p>Si le problème persiste, vérifiez les logs de déploiement sur Railway.</p>
             </div>
             {% endif %}
         </div>
@@ -459,7 +448,7 @@ HTML_TEMPLATE = """
                 <h3>🎥 Configuration OBS (Site A - Émetteur)</h3>
 
                 <div class="config-box">
-                    <h4><span class="emoji">📡</span>URL du serveur SRT (Mode: Caller automatique)</h4>
+                    <h4><span class="emoji">📡</span>URL du serveur SRT (Mode: Caller)</h4>
                     <code id="obs-url">{{ srt_url_publish }}</code>
                     <button class="copy-btn" onclick="copyToClipboard('obs-url')">📋 Copier</button>
 
@@ -471,10 +460,7 @@ HTML_TEMPLATE = """
                             <li>Service: Sélectionnez <strong>"Personnalisé"</strong></li>
                             <li>Serveur: <strong>Collez l'URL ci-dessus</strong></li>
                             <li>Clé de diffusion: Laissez <strong>VIDE</strong></li>
-                            <li>Cliquez <strong>OK</strong></li>
-                            <li>Cliquez <strong>"Démarrer la diffusion"</strong></li>
                         </ol>
-                        <p style="margin-top: 10px;"><strong>Note:</strong> OBS se connecte automatiquement en mode Caller</p>
                     </div>
                 </div>
             </div>
@@ -485,7 +471,7 @@ HTML_TEMPLATE = """
                 <h3>📺 Configuration vMix (Site B - Récepteur)</h3>
 
                 <div class="config-box">
-                    <h4><span class="emoji">📥</span>URL de réception SRT (Mode: Caller automatique)</h4>
+                    <h4><span class="emoji">📥</span>URL de réception SRT (Mode: Caller)</h4>
                     <code id="vmix-url">{{ srt_url_play }}</code>
                     <button class="copy-btn" onclick="copyToClipboard('vmix-url')">📋 Copier</button>
 
@@ -493,40 +479,12 @@ HTML_TEMPLATE = """
                         <strong>Instructions vMix :</strong>
                         <ol>
                             <li>Ouvrez <strong>vMix</strong></li>
-                            <li>Cliquez sur <strong>"Add Input"</strong> (Ajouter une entrée)</li>
-                            <li>Sélectionnez <strong>"Stream / SRT"</strong></li>
+                            <li>Cliquez sur <strong>"Add Input"</strong> → <strong>"Stream / SRT"</strong></li>
+                            <li>Type de Stream: <strong>SRT (Caller)</strong></li>
                             <li><strong>Collez l'URL ci-dessus</strong> dans le champ URL</li>
-                            <li><strong>NE changez PAS le mode</strong> (Caller par défaut)</li>
-                            <li>Cliquez <strong>"OK"</strong></li>
-                            <li><strong>IMPORTANT:</strong> OBS doit diffuser AVANT de configurer vMix</li>
                         </ol>
-                        <p style="margin-top: 10px;"><strong>Note:</strong> vMix se connecte en mode Caller (pas Listener!)</p>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3>📊 Statistiques du relay</h3>
-            <div class="stats-grid">
-                <div class="stat-box">
-                    <h4>Débit actuel</h4>
-                    <div class="value">{{ current_bitrate }}</div>
-                </div>
-                <div class="stat-box">
-                    <h4>Port SRT</h4>
-                    <div class="value">{{ srt_port }}</div>
-                </div>
-                <div class="stat-box">
-                    <h4>Statut</h4>
-                    <div class="value">{{ 'ON' if is_running else 'OFF' }}</div>
-                </div>
-            </div>
-
-            <div class="warning" style="margin-top: 20px;">
-                <strong>🔒 Confidentialité garantie</strong>
-                <p>Votre flux vidéo passe uniquement en mémoire RAM et n'est JAMAIS enregistré sur le disque.
-                Le serveur agit comme un simple relais (tuyau) sans aucun stockage.</p>
             </div>
         </div>
     </div>
@@ -563,22 +521,10 @@ HTML_TEMPLATE = """
 def index():
     """Page principale avec la configuration"""
 
-    # Récupère l'URL de l'application (Railway, Fly.io, ou autre)
-    # Essaie plusieurs variables d'environnement
-    app_url = os.environ.get('RAILWAY_STATIC_URL',
-                             os.environ.get('FLY_APP_NAME', 'localhost'))
-
-    # Nettoie l'URL si nécessaire
-    if app_url.startswith('https://'):
-        app_url = app_url.replace('https://', '')
-    if app_url.startswith('http://'):
-        app_url = app_url.replace('http://', '')
-
-    # Si c'est Fly.io, ajoute .fly.dev
-    if not '.' in app_url and app_url != 'localhost':
-        full_url = f"{app_url}.fly.dev"
-    else:
-        full_url = app_url
+    # Les URLs publiques DOIVENT être définies par l'utilisateur dans les variables d'environnement de Railway.
+    # Railway fournit une URL unique pour chaque port TCP/UDP que vous exposez.
+    srt_url_publish = os.environ.get('SRT_URL_PUBLISH', 'srt://<definir-variable-SRT_URL_PUBLISH>')
+    srt_url_play = os.environ.get('SRT_URL_PLAY', 'srt://<definir-variable-SRT_URL_PLAY>')
 
     # Format temps de connexion
     obs_time = server_state['obs_connection_time'].strftime('%H:%M:%S') if server_state.get('obs_connection_time') else None
@@ -588,8 +534,8 @@ def index():
         HTML_TEMPLATE,
         is_running=server_state['is_running'],
         start_time=server_state['start_time'].strftime('%Y-%m-%d %H:%M:%S') if server_state['start_time'] else None,
-        srt_url_publish=f"srt://{full_url}:{SRT_PORT}",
-        srt_url_play=f"srt://{full_url}:{SRT_PORT + 1}",
+        srt_url_publish=srt_url_publish,
+        srt_url_play=srt_url_play,
         srt_port=SRT_PORT,
         current_bitrate=server_state['stats'].get('current_bitrate', '0 kbits/s'),
         obs_connected=server_state.get('obs_connected', False),
@@ -611,7 +557,7 @@ def api_status():
 
 @app.route('/health')
 def health():
-    """Health check pour Fly.io"""
+    """Health check pour le service web"""
     return jsonify({'status': 'healthy', 'srt_running': server_state['is_running']})
 
 
