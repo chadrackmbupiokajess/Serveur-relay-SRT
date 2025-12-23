@@ -37,20 +37,28 @@ server_state = {
 
 
 def start_srt_relay():
-    """Démarre le serveur relay SRT avec srt-live-transmit"""
+    """Démarre le serveur relay SRT avec ffmpeg - Configuration optimisée"""
     global server_state
 
     try:
         logger.info(f"🚀 Démarrage du relay SRT sur le port {SRT_PORT}")
 
-        # Commande srt-live-transmit pour relay SRT
-        # Format: srt-live-transmit INPUT OUTPUT
-        # OBS se connecte sur port 9000 (listener), on redirige vers port 9001 (listener pour vMix)
+        # Configuration FFmpeg pour relay SRT
+        # Stratégie: Écoute sur port 9000, redistribue sur port 9001
+        # OBS et vMix se connectent tous les deux en mode Caller
         cmd = [
-            'srt-live-transmit',
-            '-v',  # Verbose mode pour logs
-            f'srt://0.0.0.0:{SRT_PORT}?mode=listener',  # Input: écoute OBS
-            f'srt://0.0.0.0:{SRT_PORT + 1}?mode=listener'  # Output: écoute vMix
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel', 'info',
+            # Input: Écoute les connexions SRT d'OBS
+            '-i', f'srt://0.0.0.0:{SRT_PORT}?mode=listener&latency=200000&rcvbuf=48234496',
+            # Pas de réencodage (relay pur)
+            '-c:v', 'copy',
+            '-c:a', 'copy',
+            # Format MPEGTS pour SRT
+            '-f', 'mpegts',
+            # Output: Écoute pour vMix sur port différent
+            f'srt://0.0.0.0:{SRT_PORT + 1}?mode=listener&latency=200000&sndbuf=48234496&pkt_size=1316'
         ]
 
         process = subprocess.Popen(
@@ -69,16 +77,16 @@ def start_srt_relay():
         logger.info(f"📥 OBS: Connectez-vous sur port {SRT_PORT} (mode Caller)")
         logger.info(f"📺 vMix: Connectez-vous sur port {SRT_PORT + 1} (mode Caller)")
 
-        # Thread pour lire les logs srt-live-transmit
-        threading.Thread(target=monitor_srt_output, args=(process,), daemon=True).start()
+        # Thread pour lire les logs FFmpeg
+        threading.Thread(target=monitor_ffmpeg_output, args=(process,), daemon=True).start()
 
     except Exception as e:
         logger.error(f"❌ Erreur démarrage SRT relay: {e}")
         server_state['is_running'] = False
 
 
-def monitor_srt_output(process):
-    """Monitore la sortie de srt-live-transmit pour détecter connexions"""
+def monitor_ffmpeg_output(process):
+    """Monitore la sortie de FFmpeg pour détecter connexions et stats"""
     global server_state
 
     for line in iter(process.stderr.readline, ''):
@@ -87,41 +95,41 @@ def monitor_srt_output(process):
 
         line_lower = line.lower()
 
-        # Log toutes les lignes pour debug
-        logger.info(f"SRT: {line.strip()}")
+        # Log toutes les lignes importantes pour debug
+        if 'srt' in line_lower or 'error' in line_lower or 'warning' in line_lower:
+            logger.info(f"FFmpeg: {line.strip()}")
 
-        # Détection connexion OBS (caller qui se connecte sur le listener input)
-        if 'accepted' in line_lower or 'connected' in line_lower:
-            if 'caller' in line_lower or f':{SRT_PORT}' in line:
+        # Détection connexion OBS sur le port input
+        if 'srt' in line_lower and ('accepted' in line_lower or 'connected' in line_lower):
+            if f':{SRT_PORT}' in line or 'caller' in line_lower:
                 logger.info("📥 OBS connecté!")
                 server_state['obs_connected'] = True
                 server_state['obs_connection_time'] = datetime.now()
 
-        # Détection connexion vMix (caller qui se connecte sur le listener output)
-        if 'accepted' in line_lower or 'connected' in line_lower:
+        # Détection connexion vMix sur le port output
+        if 'srt' in line_lower and ('accepted' in line_lower or 'connected' in line_lower):
             if f':{SRT_PORT + 1}' in line:
                 logger.info("📺 vMix connecté!")
                 server_state['vmix_connected'] = True
                 server_state['vmix_connection_time'] = datetime.now()
 
-        # Extraction stats (mbps, kbps)
-        if 'mbps' in line_lower or 'kbps' in line_lower:
+        # Extraction stats de bitrate
+        if 'bitrate=' in line:
             try:
-                # Cherche un pattern comme "1.5 Mbps" ou "1500 kbps"
-                import re
-                match = re.search(r'(\d+\.?\d*)\s*(mbps|kbps)', line_lower)
-                if match:
-                    server_state['stats']['current_bitrate'] = f"{match.group(1)} {match.group(2)}"
+                parts = line.split('bitrate=')
+                if len(parts) > 1:
+                    bitrate_str = parts[1].split()[0]
+                    server_state['stats']['current_bitrate'] = bitrate_str
             except:
                 pass
 
         # Détection déconnexion
-        if 'closed' in line_lower or 'disconnected' in line_lower or 'broken' in line_lower:
+        if 'connection closed' in line_lower or 'end of file' in line_lower or 'broken pipe' in line_lower:
             logger.warning("⚠️ Déconnexion détectée")
             server_state['obs_connected'] = False
             server_state['vmix_connected'] = False
 
-    logger.warning("⚠️ Processus srt-live-transmit terminé")
+    logger.warning("⚠️ Processus FFmpeg terminé")
     server_state['is_running'] = False
     server_state['obs_connected'] = False
     server_state['vmix_connected'] = False

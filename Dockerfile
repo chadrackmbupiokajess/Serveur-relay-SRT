@@ -1,10 +1,9 @@
 # Dockerfile pour SRT Video Relay Server
 FROM python:3.11-slim
 
-# Installation de srt-live-transmit et ffmpeg
+# Installation de ffmpeg avec support SRT
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    srt-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Créer le répertoire de travail
