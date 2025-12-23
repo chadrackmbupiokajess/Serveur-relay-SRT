@@ -18,8 +18,10 @@ COPY app.py .
 # Exposer les ports
 # Port 8080 pour l'interface web
 EXPOSE 8080
-# Port 9000 pour SRT
+# Port 9000 pour SRT (OBS)
 EXPOSE 9000/udp
+# Port 9001 pour SRT (vMix)
+EXPOSE 9001/udp
 
 # Variables d'environnement par défaut
 ENV PORT=8080
